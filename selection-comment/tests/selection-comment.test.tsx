@@ -2,7 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { SessionMessage } from 'claude-code'
 
-import { findOrigin, formatComment } from '../hooks/register'
+import type { Stored } from '../types'
+import { collapseDraft, expandDraft, findOrigin, formatComment, tokenFor, viewOf } from '../hooks/comment'
 
 const PLUGIN = 'selection-comment'
 const BAND_PROPS = {
@@ -73,12 +74,62 @@ test('findOrigin finds tool output without a row id, and gives up quietly', () =
   expect(findOrigin(MESSAGES, 'never said')).toEqual({})
 })
 
+const STORED: Record<string, Stored> = {
+  C1: { id: 'C1', text: 'Use a debounce of 300ms here', source: 'assistant · turn 1', context: 'Plan:\n[SELECTION]\nso typing stays smooth' },
+  C2: { id: 'C2', text: 'not ok 2 search' },
+}
+
+test('tokenFor keeps its own marks out of what it shows', () => {
+  expect(tokenFor({ ...STORED.C1!, note: 'why 300?' })).toBe('[C1 · assistant · turn 1: "Use a debounce of 300ms here" → why 300?]')
+  expect(tokenFor({ id: 'C3', text: 'a [b] "c" → d', note: '' })).toBe(`[C3: "a (b) 'c' -> d"]`)
+})
+
+test('expandDraft reads the note from the token as edited', () => {
+  const draft = 'look at these\n[C1 · assistant · turn 1: "Use a debounce…" → why 200? [really]]\n[C2: "not ok"]\n[C9: "unknown"]\nthanks'
+  expect(expandDraft(draft, STORED)).toBe(
+    'look at these\n' +
+      formatComment({ ...STORED.C1!, note: 'why 200? [really]' }) +
+      formatComment({ ...STORED.C2!, note: '' }) +
+      '[C9: "unknown"]\nthanks',
+  )
+})
+
+test('collapseDraft keeps edits made to the full block', () => {
+  const draft = expandDraft('[C1: "x" → why?]\n[C2: "y"]', STORED)
+    .replace('Use a debounce of 300ms here', 'Use a debounce')
+    .replace('<note>why?</note>', '<note>shorter</note>')
+    .replace(' source="assistant · turn 1"', '')
+  const collapsed = collapseDraft(draft, STORED)
+  expect(collapsed.text).toBe('[C1: "Use a debounce" → shorter]\n[C2: "not ok 2 search"]')
+  expect(collapsed.comments.C1).toEqual({ id: 'C1', text: 'Use a debounce', source: undefined, context: STORED.C1!.context })
+  expect(collapsed.comments.C2).toEqual({ id: 'C2', text: 'not ok 2 search', source: undefined, context: undefined })
+})
+
+test('collapseDraft keeps a long quote whole while its cut is untouched', () => {
+  const text = Array.from({ length: 25 }, (_, i) => `line ${i}`).join('\n')
+  const stored = { C1: { id: 'C1', text } }
+  const collapsed = collapseDraft(expandDraft('[C1: "x"]', stored), stored)
+  expect(collapsed.comments.C1!.text).toBe(text)
+})
+
+test('collapseDraft leaves a mangled block as it is', () => {
+  const draft = '<comment id="C1">\nno quote here\n</comment>'
+  expect(collapseDraft(draft, STORED).text).toBe(draft)
+})
+
+test('viewOf tells tokens from blocks', () => {
+  expect(viewOf('[C1: "x"]', STORED)).toBe('tokens')
+  expect(viewOf(expandDraft('[C1: "x"]', STORED), STORED)).toBe('blocks')
+  expect(viewOf('[C9: "x"]\nplain', STORED)).toBe(null)
+})
+
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`select, comment, Enter fills the prompt (${surface})`, async ($, on) => {
+  test(`select, comment, Enter fills a token; expand, collapse and submit (${surface})`, async ($, on) => {
     const clock = mock.clock(on)
     let selected: string | undefined
     let draft = 'intro'
     const fills: string[] = []
+    const sent: string[] = []
 
     on('session.start', async ($, e) => ({ cwd: e.cwd }))
     on('ui.render', async ($, e) => {
@@ -92,8 +143,12 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('prompt.read', async () => ({ value: { text: draft, cursor: draft.length } }))
     on('prompt.fill', async ($, e) => {
       fills.push(e.text)
-      draft += e.text
+      draft = e.mode === 'replace' ? e.text : draft + e.text
       return { isFilled: true, text: draft }
+    })
+    on('prompt.submit', async ($, e) => {
+      sent.push(e.text)
+      return { text: e.text }
     })
 
     await $.session.start({ cwd: '/', surface, isInteractive: true })
@@ -102,26 +157,36 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     selected = 'const x = 1\nconst y = 2'
     await clock.advance(400)
-    expect(await ui.find({ key: 'comment' })).toBeDefined()
-
     await ui.press({ key: 'comment' })
     await ui.input({ key: 'comment-input', text: 'rename these' })
 
-    expect(fills).toEqual([
-      '\n<comment id="C1" source="assistant · turn 1">\n<quote>\nconst x = 1\nconst y = 2\n</quote>\n<context>\nHere:\n[SELECTION]\nDone.\n</context>\n<note>rename these</note>\n</comment>\n',
-    ])
+    const token = '[C1 · assistant · turn 1: "const x = 1 const y = 2" → rename these]'
+    expect(fills).toEqual([`\n${token}\n`])
     expect(await ui.find({ key: 'comment' })).toBeUndefined()
-    expect(await ui.find({ key: 'comment-input' })).toBeUndefined()
 
-    // The same selection does not bring the band back.
+    // The same selection does not bring the selection back, but the toggle stays.
     await clock.advance(400)
     expect(await ui.find({ key: 'comment' })).toBeUndefined()
+    expect(await ui.find({ key: 'toggle' })).toBeDefined()
 
-    // The next comment takes the next id.
+    // The note edited in the token, then expanded, edited, collapsed.
+    draft = draft.replace('rename these', 'rename both')
+    await ui.press({ key: 'toggle' })
+    expect(draft).toContain('<note>rename both</note>')
+    expect(draft).toContain('<context>\nHere:\n[SELECTION]\nDone.\n</context>')
+    draft = draft.replace('<note>rename both</note>', '<note>inline them</note>')
+    await ui.press({ key: 'toggle' })
+    expect(draft).toBe('intro\n[C1 · assistant · turn 1: "const x = 1 const y = 2" → inline them]\n')
+
+    // The model gets the full block; the next comment takes the next id.
+    await $.prompt.submit({ text: draft, wait: false, origin: { kind: 'composer' } })
+    expect(sent.at(-1)).toContain('<comment id="C1" source="assistant · turn 1">')
+    expect(sent.at(-1)).toContain('<note>inline them</note>')
+
     selected = 'Done.'
     await clock.advance(400)
     await ui.press({ key: 'comment' })
     await ui.input({ key: 'comment-input', text: '' })
-    expect(fills[1]).toContain('<comment id="C2"')
+    expect(fills.at(-1)).toContain('[C2 ')
   })
 }
