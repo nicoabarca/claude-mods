@@ -1,0 +1,16 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "Nicolás Abarca"
+  },
+  "metadata": {
+    "description": "Claude Code mods by Nicolás Abarca"
+  },
+  "plugins": [
+    {
+      "name": "selection-comment",
+      "source": "./selection-comment",
+      "description": "Highlight transcript text, add a comment, and drop both into the prompt box"
+    }
+  ]
+}

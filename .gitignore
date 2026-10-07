@@ -1,0 +1,5 @@
+# Written by Claude Code each time it loads a mod
+.claude-plugin/types/
+selection-comment/.claude-plugin/types/
+*/.claude-plugin/types/
+.DS_Store
