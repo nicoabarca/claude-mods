@@ -1,6 +1,6 @@
 {
   "name": "selection-comment",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Highlight transcript text, add a comment, and drop both into the prompt box",
   "author": { "name": "Nicolás Abarca" },
   "types": "./types/index.d.ts"
